@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { User } from '../../types';
 import { StorageService } from '../../services/storage';
@@ -51,11 +52,11 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
         }
 
         const newUser: User = {
-          id: '', // Will be set by Firebase Auth UID
+          id: '', // Will be set by Storage
           userId: formData.userId,
           username: formData.username, 
           name: formData.username, 
-          password: '', // Don't store raw password
+          password: formData.password,
           avatar: `https://picsum.photos/seed/${formData.userId}/200`,
           coverPhoto: `https://picsum.photos/seed/${formData.userId}/800/300`,
           bio: 'Hello Neo World!',
@@ -70,13 +71,7 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
       }
     } catch (err: any) {
       console.error(err);
-      if (err.code === 'auth/email-already-in-use') {
-          setError('User ID already exists.');
-      } else if (err.code === 'auth/invalid-credential' || err.message === 'User profile not found') {
-          setError('Invalid credentials.');
-      } else {
-          setError('Authentication failed. Check connection.');
-      }
+      setError(err.message || 'Authentication failed. Check credentials.');
     } finally {
       setLoading(false);
     }

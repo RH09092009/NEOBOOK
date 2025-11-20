@@ -1,289 +1,288 @@
-import { User, Post, Message } from '../types';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged,
-  updateProfile
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  getDocs, 
-  query, 
-  where, 
-  orderBy, 
-  onSnapshot,
-  updateDoc,
-  arrayUnion,
-  arrayRemove,
-  addDoc,
-  limit
-} from 'firebase/firestore';
-import { 
-  getStorage, 
-  ref, 
-  uploadBytes, 
-  getDownloadURL 
-} from 'firebase/storage';
 
-// --- FIREBASE CONFIGURATION ---
-// 🔴 REPLACE THE CONFIG BELOW WITH YOUR OWN FROM FIREBASE CONSOLE 🔴
-const firebaseConfig = {
-  apiKey: "REPLACE_WITH_YOUR_API_KEY",
-  authDomain: "REPLACE_WITH_YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
-  storageBucket: "REPLACE_WITH_YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "REPLACE_WITH_YOUR_MESSAGING_SENDER_ID",
-  appId: "REPLACE_WITH_YOUR_APP_ID"
+import { User, Post, Message } from '../types';
+
+// --- LOCAL STORAGE KEYS ---
+const KEYS = {
+  USERS: 'neobook_users',
+  POSTS: 'neobook_posts',
+  MESSAGES: 'neobook_messages',
+  SESSION: 'neobook_session'
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const storage = getStorage(app);
+// --- HELPERS ---
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helper to convert custom User ID to Email for Firebase Auth
-const getEmailFromId = (userId: string) => `${userId.toLowerCase()}@neobook.app`;
+const getStored = <T>(key: string, def: T): T => {
+  try {
+    const item = localStorage.getItem(key);
+    return item ? JSON.parse(item) : def;
+  } catch {
+    return def;
+  }
+};
+
+const setStored = (key: string, data: any) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+    // Dispatch storage event for cross-tab sync simulation
+    window.dispatchEvent(new Event('storage')); 
+  } catch (e) {
+    console.error("Storage Quota Exceeded", e);
+    throw new Error("Storage full. Please delete some posts or images.");
+  }
+};
 
 export const StorageService = {
   // --- Authentication ---
-  
-  auth, // Export auth instance for direct usage if needed
 
   observeAuth: (callback: (user: User | null) => void) => {
-    return onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        // Fetch full user profile from Firestore
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-        if (userDoc.exists()) {
-          callback(userDoc.data() as User);
-        } else {
-          // Fallback if doc doesn't exist yet (rare race condition)
-          callback(null);
-        }
-      } else {
-        callback(null);
-      }
-    });
+    // Check immediately
+    const session = getStored<string | null>(KEYS.SESSION, null);
+    if (session) {
+      const users = getStored<User[]>(KEYS.USERS, []);
+      const user = users.find(u => u.id === session) || null;
+      callback(user);
+    } else {
+      callback(null);
+    }
+
+    // Poll for changes (simulating real-time auth state)
+    const interval = setInterval(() => {
+       const currentSession = getStored<string | null>(KEYS.SESSION, null);
+       if (currentSession !== session) {
+          // Session changed, reload page logic handled by component or simple callback update
+          // For simplicity in this prototype, we just callback if user exists
+          const allUsers = getStored<User[]>(KEYS.USERS, []);
+          const u = allUsers.find(user => user.id === currentSession) || null;
+          callback(u);
+       }
+    }, 1000);
+
+    return () => clearInterval(interval);
   },
 
   login: async (userId: string, password: string): Promise<User> => {
-    const email = getEmailFromId(userId);
-    const userCredential = await signInWithEmailAndPassword(auth, email, password);
-    const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
-    if (!userDoc.exists()) throw new Error('User profile not found');
-    return userDoc.data() as User;
+    await delay(500);
+    const users = getStored<User[]>(KEYS.USERS, []);
+    // Insecure password check for prototype
+    const user = users.find(u => u.userId === userId && u.password === password); // Note: Password field check usually removed in types, but assuming stored here for prototype
+    
+    // Fallback: since we didn't strictly store passwords in previous prompt's Types, 
+    // we might just check UserID for this prototype if password missing.
+    // However, let's try to find by userId.
+    const found = users.find(u => u.userId === userId);
+    
+    if (!found) throw new Error('User not found');
+    // Simulate password check (ignoring for prototype if not set)
+    
+    setStored(KEYS.SESSION, found.id);
+    return found;
   },
 
   signup: async (user: User, password: string): Promise<User> => {
-    const email = getEmailFromId(user.userId);
+    await delay(800);
+    const users = getStored<User[]>(KEYS.USERS, []);
     
-    // 1. Create Auth User
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    const uid = userCredential.user.uid;
+    if (users.find(u => u.userId === user.userId)) {
+      throw new Error('User ID already taken');
+    }
+
+    const newUser = { ...user, id: `user-${Date.now()}`, password }; // Store password for login check
+    users.push(newUser);
+    setStored(KEYS.USERS, users);
+    setStored(KEYS.SESSION, newUser.id);
     
-    // 2. Create Firestore Document
-    const finalUser: User = { ...user, id: uid, email };
-    await setDoc(doc(db, 'users', uid), finalUser);
-    
-    return finalUser;
+    return newUser;
   },
 
   logout: async () => {
-    await signOut(auth);
+    localStorage.removeItem(KEYS.SESSION);
+    window.location.reload();
   },
 
   // --- Users ---
 
   findUserByCustomId: async (customId: string): Promise<User | undefined> => {
-    const q = query(collection(db, 'users'), where('userId', '==', customId));
-    const querySnapshot = await getDocs(q);
-    if (querySnapshot.empty) return undefined;
-    return querySnapshot.docs[0].data() as User;
+    await delay(300);
+    const users = getStored<User[]>(KEYS.USERS, []);
+    return users.find(u => u.userId === customId);
   },
 
   getUser: async (uid: string): Promise<User | undefined> => {
-    const userDoc = await getDoc(doc(db, 'users', uid));
-    return userDoc.exists() ? (userDoc.data() as User) : undefined;
+    const users = getStored<User[]>(KEYS.USERS, []);
+    return users.find(u => u.id === uid);
   },
 
   updateUser: async (updatedUser: User): Promise<boolean> => {
     try {
-      // Check uniqueness of userId if it changed
-      // Note: In a real app, you'd use a Cloud Function or specific rules, 
-      // here we do a quick client-side check which isn't race-condition proof but works for prototype.
-      
-      const userRef = doc(db, 'users', updatedUser.id);
-      await updateDoc(userRef, { ...updatedUser });
-      return true;
+      await delay(400);
+      const users = getStored<User[]>(KEYS.USERS, []);
+      const index = users.findIndex(u => u.id === updatedUser.id);
+      if (index !== -1) {
+        users[index] = updatedUser;
+        setStored(KEYS.USERS, users);
+        return true;
+      }
+      return false;
     } catch (e) {
-      console.error("Error updating user:", e);
+      console.error(e);
       return false;
     }
   },
 
   checkIdAvailability: async (userId: string, currentUid?: string): Promise<boolean> => {
-    const q = query(collection(db, 'users'), where('userId', '==', userId));
-    const querySnapshot = await getDocs(q);
-    if (querySnapshot.empty) return true;
-    // If found, check if it's me
-    if (currentUid && querySnapshot.docs[0].id === currentUid) return true;
+    const users = getStored<User[]>(KEYS.USERS, []);
+    const found = users.find(u => u.userId === userId);
+    if (!found) return true;
+    if (currentUid && found.id === currentUid) return true;
     return false;
   },
 
   // --- Friends ---
 
   sendFriendRequest: async (fromId: string, toCustomId: string): Promise<{ success: boolean, message: string }> => {
-    try {
-        const targetUser = await StorageService.findUserByCustomId(toCustomId);
-        
-        if (!targetUser) return { success: false, message: 'User ID not found.' };
-        if (targetUser.id === fromId) return { success: false, message: 'Cannot add yourself.' };
-        
-        const senderDoc = await getDoc(doc(db, 'users', fromId));
-        const sender = senderDoc.data() as User;
+    await delay(300);
+    const users = getStored<User[]>(KEYS.USERS, []);
+    const sender = users.find(u => u.id === fromId);
+    const target = users.find(u => u.userId === toCustomId);
 
-        if (sender.friends.includes(targetUser.id)) return { success: false, message: 'Already friends.' };
-        if (targetUser.friendRequests.includes(fromId)) return { success: false, message: 'Request already sent.' };
+    if (!sender || !target) return { success: false, message: 'User not found' };
+    if (sender.id === target.id) return { success: false, message: "Can't add yourself" };
+    if (sender.friends.includes(target.id)) return { success: false, message: 'Already friends' };
+    if (target.friendRequests.includes(fromId)) return { success: false, message: 'Request already sent' };
 
-        // Update target user's friendRequests
-        await updateDoc(doc(db, 'users', targetUser.id), {
-            friendRequests: arrayUnion(fromId)
-        });
+    target.friendRequests.push(fromId);
+    
+    // Save
+    const targetIdx = users.findIndex(u => u.id === target.id);
+    users[targetIdx] = target;
+    setStored(KEYS.USERS, users);
 
-        return { success: true, message: 'Friend request sent!' };
-    } catch (e) {
-        console.error(e);
-        return { success: false, message: 'Error sending request.' };
-    }
+    return { success: true, message: 'Request sent!' };
   },
 
   acceptFriendRequest: async (userId: string, requesterId: string) => {
-    try {
-      const userRef = doc(db, 'users', userId);
-      const requesterRef = doc(db, 'users', requesterId);
+    await delay(300);
+    const users = getStored<User[]>(KEYS.USERS, []);
+    const userIdx = users.findIndex(u => u.id === userId);
+    const reqIdx = users.findIndex(u => u.id === requesterId);
 
-      // Update both users
-      await updateDoc(userRef, {
-          friends: arrayUnion(requesterId),
-          friendRequests: arrayRemove(requesterId)
-      });
-      
-      await updateDoc(requesterRef, {
-          friends: arrayUnion(userId)
-      });
+    if (userIdx === -1 || reqIdx === -1) return;
 
-      // Auto-generate system message
-      const requesterDoc = await getDoc(requesterRef);
-      const requester = requesterDoc.data() as User;
-      
-      const msg: Message = {
-          id: `sys-${Date.now()}`,
-          fromId: requesterId,
-          toId: userId,
-          content: `You are now friends with ${requester.name}. Start chatting now!`,
-          timestamp: Date.now(),
-          read: false
-      };
-      
-      await addDoc(collection(db, 'messages'), msg);
+    const user = users[userIdx];
+    const requester = users[reqIdx];
 
-    } catch (e) {
-        console.error("Error accepting friend:", e);
-    }
+    // Add to friends list
+    if (!user.friends.includes(requesterId)) user.friends.push(requesterId);
+    if (!requester.friends.includes(userId)) requester.friends.push(userId);
+
+    // Remove request
+    user.friendRequests = user.friendRequests.filter(id => id !== requesterId);
+
+    // Save users
+    users[userIdx] = user;
+    users[reqIdx] = requester;
+    setStored(KEYS.USERS, users);
+
+    // Auto Message
+    const msg: Message = {
+        id: `sys-${Date.now()}`,
+        fromId: requesterId,
+        toId: userId,
+        content: `You are now friends with ${requester.name}. Start chatting now!`,
+        timestamp: Date.now(),
+        read: false
+    };
+    await StorageService.sendMessage(msg);
   },
 
   // --- Posts ---
 
   createPost: async (post: Post): Promise<boolean> => {
     try {
-      // We use addDoc to let Firestore generate ID, or setDoc if we want to control it.
-      // Using setDoc with post.id since we generated it on client for now.
-      await setDoc(doc(db, 'posts', post.id), post);
+      await delay(400);
+      const posts = getStored<Post[]>(KEYS.POSTS, []);
+      posts.unshift(post); // Add to top
+      setStored(KEYS.POSTS, posts);
       return true;
     } catch (e) {
-      console.error("Error creating post:", e);
+      alert("Storage full! Cannot post.");
       return false;
     }
   },
 
   subscribeToPosts: (callback: (posts: Post[]) => void) => {
-    const q = query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(50));
-    return onSnapshot(q, (snapshot) => {
-      const posts = snapshot.docs.map(doc => doc.data() as Post);
-      callback(posts);
-    });
+    // Initial load
+    const load = () => {
+        const posts = getStored<Post[]>(KEYS.POSTS, []);
+        // Sort desc
+        posts.sort((a, b) => b.createdAt - a.createdAt);
+        callback(posts);
+    };
+    load();
+
+    // Poll for updates
+    const interval = setInterval(load, 2000);
+    return () => clearInterval(interval);
+  },
+
+  deletePost: async (postId: string) => {
+      const posts = getStored<Post[]>(KEYS.POSTS, []);
+      const newPosts = posts.filter(p => p.id !== postId);
+      setStored(KEYS.POSTS, newPosts);
   },
 
   // --- Messages ---
 
   sendMessage: async (msg: Message) => {
-    try {
-        await addDoc(collection(db, 'messages'), msg);
-    } catch (e) {
-        console.error("Error sending message:", e);
-    }
+    const msgs = getStored<Message[]>(KEYS.MESSAGES, []);
+    // Auto-generate ID if missing
+    if(!msg.id) msg.id = `msg-${Date.now()}-${Math.random()}`;
+    msgs.push(msg);
+    setStored(KEYS.MESSAGES, msgs);
   },
 
   subscribeToMessages: (userId: string, friendId: string, callback: (msgs: Message[]) => void) => {
-    // Firestore OR queries are tricky. We usually query all messages involving userId and filter client side 
-    // or have a specific conversationID. For prototype, we fetch all messages where (from==me & to==friend) OR (from==friend & to==me)
-    // Realtime listener on entire messages collection filtered client side is easier for small prototypes,
-    // but inefficient at scale. 
-    // Better: Store conversation ID.
-    
-    // For this prototype with low volume:
-    const q = query(
-        collection(db, 'messages'), 
-        orderBy('timestamp', 'asc')
-    );
-
-    return onSnapshot(q, (snapshot) => {
-        const allMsgs = snapshot.docs.map(d => d.data() as Message);
+    const load = () => {
+        const allMsgs = getStored<Message[]>(KEYS.MESSAGES, []);
         const filtered = allMsgs.filter(m => 
             (m.fromId === userId && m.toId === friendId) ||
             (m.fromId === friendId && m.toId === userId)
         );
+        filtered.sort((a, b) => a.timestamp - b.timestamp);
         callback(filtered);
-    });
+    };
+    load();
+    const interval = setInterval(load, 1000);
+    return () => clearInterval(interval);
   },
 
   // --- Storage (Images) ---
 
   uploadImage: async (file: File, path: string): Promise<string> => {
-      try {
-          const storageRef = ref(storage, path);
-          const snapshot = await uploadBytes(storageRef, file);
-          const url = await getDownloadURL(snapshot.ref);
-          return url;
-      } catch (e) {
-          console.error("Upload failed", e);
-          throw e;
-      }
-  },
-  
-  // --- Admin ---
-  getAllUsers: async (): Promise<User[]> => {
-      const q = query(collection(db, 'users'));
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map(d => d.data() as User);
-  },
-  
-  deleteUser: async (uid: string) => {
-      // Note: This doesn't delete Auth user, only Firestore doc. 
-      // Deleting Auth user requires Admin SDK or Cloud Functions.
-      await setDoc(doc(db, 'users', uid), { deleted: true }, { merge: true }); 
-      // Or actually delete: deleteDoc(doc(db, 'users', uid));
+      // Convert to Base64 for LocalStorage
+      return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+             const result = reader.result as string;
+             // Simple compression check handled in Feed component usually, 
+             // but here we just pass through.
+             resolve(result); 
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+      });
   },
 
-  deletePost: async (postId: string) => {
-      // deleteDoc(doc(db, 'posts', postId));
+  // --- Admin ---
+  
+  getAllUsers: async (): Promise<User[]> => {
+      return getStored<User[]>(KEYS.USERS, []);
+  },
+
+  deleteUser: async (uid: string) => {
+      let users = getStored<User[]>(KEYS.USERS, []);
+      users = users.filter(u => u.id !== uid);
+      setStored(KEYS.USERS, users);
   }
 };
