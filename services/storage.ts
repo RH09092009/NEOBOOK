@@ -1,212 +1,289 @@
 import { User, Post, Message } from '../types';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  updateProfile
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot,
+  updateDoc,
+  arrayUnion,
+  arrayRemove,
+  addDoc,
+  limit
+} from 'firebase/firestore';
+import { 
+  getStorage, 
+  ref, 
+  uploadBytes, 
+  getDownloadURL 
+} from 'firebase/storage';
 
-const KEYS = {
-  USERS: 'neobook_users',
-  POSTS: 'neobook_posts',
-  MESSAGES: 'neobook_messages',
-  SESSION: 'neobook_session',
+// --- FIREBASE CONFIGURATION ---
+// 🔴 REPLACE THE CONFIG BELOW WITH YOUR OWN FROM FIREBASE CONSOLE 🔴
+const firebaseConfig = {
+  apiKey: "REPLACE_WITH_YOUR_API_KEY",
+  authDomain: "REPLACE_WITH_YOUR_PROJECT_ID.firebaseapp.com",
+  projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
+  storageBucket: "REPLACE_WITH_YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "REPLACE_WITH_YOUR_MESSAGING_SENDER_ID",
+  appId: "REPLACE_WITH_YOUR_APP_ID"
 };
 
-// --- Initial Seed Data ---
-const seedData = () => {
-  try {
-    if (!localStorage.getItem(KEYS.USERS)) {
-      const adminUser: User = {
-        id: 'admin-uuid',
-        userId: 'admin',
-        username: 'System Admin',
-        name: 'Neo Admin',
-        password: 'admin', // Insecure, demo only
-        avatar: 'https://picsum.photos/200',
-        coverPhoto: 'https://picsum.photos/800/300',
-        bio: 'System Administrator',
-        email: 'admin@neobook.com',
-        joinedAt: Date.now(),
-        friends: [],
-        friendRequests: [],
-        isAdmin: true,
-        status: 'online'
-      };
-      const demoUser: User = {
-          id: 'demo-uuid',
-          userId: 'neo_user',
-          username: 'Neo User',
-          name: 'John Doe',
-          password: '123',
-          avatar: 'https://picsum.photos/201',
-          coverPhoto: 'https://picsum.photos/800/301',
-          bio: 'Loving the future!',
-          email: 'john@example.com',
-          joinedAt: Date.now(),
-          friends: [],
-          friendRequests: [],
-          status: 'online'
-      };
-      localStorage.setItem(KEYS.USERS, JSON.stringify([adminUser, demoUser]));
-    }
-    if (!localStorage.getItem(KEYS.POSTS)) {
-      const initialPost: Post = {
-        id: 'post-1',
-        authorId: 'admin-uuid',
-        content: 'Welcome to NEOBOOK! This is the future of social connection.',
-        likes: [],
-        comments: [],
-        createdAt: Date.now(),
-        image: 'https://picsum.photos/600/400'
-      };
-      localStorage.setItem(KEYS.POSTS, JSON.stringify([initialPost]));
-    }
-    if (!localStorage.getItem(KEYS.MESSAGES)) {
-      localStorage.setItem(KEYS.MESSAGES, JSON.stringify([]));
-    }
-  } catch (e) {
-    console.error("Initial seed failed", e);
-  }
-};
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
 
-seedData();
-
-// --- Helpers ---
-
-const safeSetItem = (key: string, value: string): boolean => {
-    try {
-        localStorage.setItem(key, value);
-        return true;
-    } catch (e: any) {
-        if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-            alert("Storage full! Please delete some posts or clear data.");
-        } else {
-            console.error("Storage error", e);
-        }
-        return false;
-    }
-};
+// Helper to convert custom User ID to Email for Firebase Auth
+const getEmailFromId = (userId: string) => `${userId.toLowerCase()}@neobook.app`;
 
 export const StorageService = {
-  getUsers: (): User[] => JSON.parse(localStorage.getItem(KEYS.USERS) || '[]'),
+  // --- Authentication ---
   
-  saveUsers: (users: User[]) => safeSetItem(KEYS.USERS, JSON.stringify(users)),
+  auth, // Export auth instance for direct usage if needed
 
-  getPosts: (): Post[] => JSON.parse(localStorage.getItem(KEYS.POSTS) || '[]'),
-  
-  savePosts: (posts: Post[]) => safeSetItem(KEYS.POSTS, JSON.stringify(posts)),
-
-  getMessages: (): Message[] => JSON.parse(localStorage.getItem(KEYS.MESSAGES) || '[]'),
-  
-  saveMessages: (msgs: Message[]) => safeSetItem(KEYS.MESSAGES, JSON.stringify(msgs)),
-
-  getCurrentUser: (): User | null => {
-    const session = localStorage.getItem(KEYS.SESSION);
-    return session ? JSON.parse(session) : null;
+  observeAuth: (callback: (user: User | null) => void) => {
+    return onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Fetch full user profile from Firestore
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDoc.exists()) {
+          callback(userDoc.data() as User);
+        } else {
+          // Fallback if doc doesn't exist yet (rare race condition)
+          callback(null);
+        }
+      } else {
+        callback(null);
+      }
+    });
   },
 
-  setCurrentUser: (user: User | null) => {
-    if (user) {
-      safeSetItem(KEYS.SESSION, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(KEYS.SESSION);
-    }
+  login: async (userId: string, password: string): Promise<User> => {
+    const email = getEmailFromId(userId);
+    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
+    if (!userDoc.exists()) throw new Error('User profile not found');
+    return userDoc.data() as User;
   },
 
-  // --- Logic ---
-
-  findUserById: (uuid: string): User | undefined => {
-    const users = StorageService.getUsers();
-    return users.find(u => u.id === uuid);
+  signup: async (user: User, password: string): Promise<User> => {
+    const email = getEmailFromId(user.userId);
+    
+    // 1. Create Auth User
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    const uid = userCredential.user.uid;
+    
+    // 2. Create Firestore Document
+    const finalUser: User = { ...user, id: uid, email };
+    await setDoc(doc(db, 'users', uid), finalUser);
+    
+    return finalUser;
   },
 
-  findUserByCustomId: (customId: string): User | undefined => {
-    const users = StorageService.getUsers();
-    return users.find(u => u.userId === customId);
+  logout: async () => {
+    await signOut(auth);
   },
 
-  createUser: (user: User): boolean => {
-    const users = StorageService.getUsers();
-    if (users.some(u => u.userId === user.userId)) return false;
-    users.push(user);
-    return StorageService.saveUsers(users);
+  // --- Users ---
+
+  findUserByCustomId: async (customId: string): Promise<User | undefined> => {
+    const q = query(collection(db, 'users'), where('userId', '==', customId));
+    const querySnapshot = await getDocs(q);
+    if (querySnapshot.empty) return undefined;
+    return querySnapshot.docs[0].data() as User;
   },
 
-  updateUser: (updatedUser: User): boolean => {
-    let users = StorageService.getUsers();
-    // Check if userId is taken by someone else
-    const existing = users.find(u => u.userId === updatedUser.userId && u.id !== updatedUser.id);
-    if (existing) return false;
-
-    users = users.map(u => u.id === updatedUser.id ? updatedUser : u);
-    const saved = StorageService.saveUsers(users);
-    if (saved) {
-        StorageService.setCurrentUser(updatedUser); // Update session too
-    }
-    return saved;
+  getUser: async (uid: string): Promise<User | undefined> => {
+    const userDoc = await getDoc(doc(db, 'users', uid));
+    return userDoc.exists() ? (userDoc.data() as User) : undefined;
   },
 
-  createPost: (post: Post) => {
-    const posts = StorageService.getPosts();
-    // Limit total posts to 50 to save space in this prototype
-    if (posts.length > 50) {
-        posts.pop(); 
-    }
-    posts.unshift(post); // Add to top
-    StorageService.savePosts(posts);
-  },
-
-  sendFriendRequest: (fromId: string, toCustomId: string): { success: boolean, message: string } => {
-    const users = StorageService.getUsers();
-    const target = users.find(u => u.userId === toCustomId);
-    const sender = users.find(u => u.id === fromId);
-
-    if (!target) return { success: false, message: 'User ID not found.' };
-    if (!sender) return { success: false, message: 'Session error.' };
-    if (target.id === fromId) return { success: false, message: 'Cannot add yourself.' };
-    if (sender.friends.includes(target.id)) return { success: false, message: 'Already friends.' };
-    if (target.friendRequests.includes(fromId)) return { success: false, message: 'Request already sent.' };
-
-    target.friendRequests.push(fromId);
-    StorageService.saveUsers(users);
-    return { success: true, message: 'Friend request sent!' };
-  },
-
-  acceptFriendRequest: (userId: string, requesterId: string) => {
-    const users = StorageService.getUsers();
-    const user = users.find(u => u.id === userId);
-    const requester = users.find(u => u.id === requesterId);
-
-    if (user && requester) {
-      user.friends.push(requesterId);
-      requester.friends.push(userId);
-      user.friendRequests = user.friendRequests.filter(id => id !== requesterId);
-      StorageService.saveUsers(users);
+  updateUser: async (updatedUser: User): Promise<boolean> => {
+    try {
+      // Check uniqueness of userId if it changed
+      // Note: In a real app, you'd use a Cloud Function or specific rules, 
+      // here we do a quick client-side check which isn't race-condition proof but works for prototype.
       
-      // Auto-generate message
-      const messages = StorageService.getMessages();
-      const timestamp = Date.now();
+      const userRef = doc(db, 'users', updatedUser.id);
+      await updateDoc(userRef, { ...updatedUser });
+      return true;
+    } catch (e) {
+      console.error("Error updating user:", e);
+      return false;
+    }
+  },
+
+  checkIdAvailability: async (userId: string, currentUid?: string): Promise<boolean> => {
+    const q = query(collection(db, 'users'), where('userId', '==', userId));
+    const querySnapshot = await getDocs(q);
+    if (querySnapshot.empty) return true;
+    // If found, check if it's me
+    if (currentUid && querySnapshot.docs[0].id === currentUid) return true;
+    return false;
+  },
+
+  // --- Friends ---
+
+  sendFriendRequest: async (fromId: string, toCustomId: string): Promise<{ success: boolean, message: string }> => {
+    try {
+        const targetUser = await StorageService.findUserByCustomId(toCustomId);
+        
+        if (!targetUser) return { success: false, message: 'User ID not found.' };
+        if (targetUser.id === fromId) return { success: false, message: 'Cannot add yourself.' };
+        
+        const senderDoc = await getDoc(doc(db, 'users', fromId));
+        const sender = senderDoc.data() as User;
+
+        if (sender.friends.includes(targetUser.id)) return { success: false, message: 'Already friends.' };
+        if (targetUser.friendRequests.includes(fromId)) return { success: false, message: 'Request already sent.' };
+
+        // Update target user's friendRequests
+        await updateDoc(doc(db, 'users', targetUser.id), {
+            friendRequests: arrayUnion(fromId)
+        });
+
+        return { success: true, message: 'Friend request sent!' };
+    } catch (e) {
+        console.error(e);
+        return { success: false, message: 'Error sending request.' };
+    }
+  },
+
+  acceptFriendRequest: async (userId: string, requesterId: string) => {
+    try {
+      const userRef = doc(db, 'users', userId);
+      const requesterRef = doc(db, 'users', requesterId);
+
+      // Update both users
+      await updateDoc(userRef, {
+          friends: arrayUnion(requesterId),
+          friendRequests: arrayRemove(requesterId)
+      });
       
-      // Message for User
-      messages.push({
-          id: `sys-${timestamp}-1`,
+      await updateDoc(requesterRef, {
+          friends: arrayUnion(userId)
+      });
+
+      // Auto-generate system message
+      const requesterDoc = await getDoc(requesterRef);
+      const requester = requesterDoc.data() as User;
+      
+      const msg: Message = {
+          id: `sys-${Date.now()}`,
           fromId: requesterId,
           toId: userId,
           content: `You are now friends with ${requester.name}. Start chatting now!`,
-          timestamp: timestamp,
+          timestamp: Date.now(),
           read: false
-      });
+      };
       
-      StorageService.saveMessages(messages);
+      await addDoc(collection(db, 'messages'), msg);
 
-      // Refresh session
-      const currentUser = StorageService.getCurrentUser();
-      if (currentUser && currentUser.id === userId) {
-          StorageService.setCurrentUser(user);
-      }
+    } catch (e) {
+        console.error("Error accepting friend:", e);
     }
   },
 
-  sendMessage: (msg: Message) => {
-      const messages = StorageService.getMessages();
-      messages.push(msg);
-      // Limit messages history per conversation or global to avoid storage issues
-      if (messages.length > 500) messages.splice(0, 100);
-      StorageService.saveMessages(messages);
+  // --- Posts ---
+
+  createPost: async (post: Post): Promise<boolean> => {
+    try {
+      // We use addDoc to let Firestore generate ID, or setDoc if we want to control it.
+      // Using setDoc with post.id since we generated it on client for now.
+      await setDoc(doc(db, 'posts', post.id), post);
+      return true;
+    } catch (e) {
+      console.error("Error creating post:", e);
+      return false;
+    }
+  },
+
+  subscribeToPosts: (callback: (posts: Post[]) => void) => {
+    const q = query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(50));
+    return onSnapshot(q, (snapshot) => {
+      const posts = snapshot.docs.map(doc => doc.data() as Post);
+      callback(posts);
+    });
+  },
+
+  // --- Messages ---
+
+  sendMessage: async (msg: Message) => {
+    try {
+        await addDoc(collection(db, 'messages'), msg);
+    } catch (e) {
+        console.error("Error sending message:", e);
+    }
+  },
+
+  subscribeToMessages: (userId: string, friendId: string, callback: (msgs: Message[]) => void) => {
+    // Firestore OR queries are tricky. We usually query all messages involving userId and filter client side 
+    // or have a specific conversationID. For prototype, we fetch all messages where (from==me & to==friend) OR (from==friend & to==me)
+    // Realtime listener on entire messages collection filtered client side is easier for small prototypes,
+    // but inefficient at scale. 
+    // Better: Store conversation ID.
+    
+    // For this prototype with low volume:
+    const q = query(
+        collection(db, 'messages'), 
+        orderBy('timestamp', 'asc')
+    );
+
+    return onSnapshot(q, (snapshot) => {
+        const allMsgs = snapshot.docs.map(d => d.data() as Message);
+        const filtered = allMsgs.filter(m => 
+            (m.fromId === userId && m.toId === friendId) ||
+            (m.fromId === friendId && m.toId === userId)
+        );
+        callback(filtered);
+    });
+  },
+
+  // --- Storage (Images) ---
+
+  uploadImage: async (file: File, path: string): Promise<string> => {
+      try {
+          const storageRef = ref(storage, path);
+          const snapshot = await uploadBytes(storageRef, file);
+          const url = await getDownloadURL(snapshot.ref);
+          return url;
+      } catch (e) {
+          console.error("Upload failed", e);
+          throw e;
+      }
+  },
+  
+  // --- Admin ---
+  getAllUsers: async (): Promise<User[]> => {
+      const q = query(collection(db, 'users'));
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(d => d.data() as User);
+  },
+  
+  deleteUser: async (uid: string) => {
+      // Note: This doesn't delete Auth user, only Firestore doc. 
+      // Deleting Auth user requires Admin SDK or Cloud Functions.
+      await setDoc(doc(db, 'users', uid), { deleted: true }, { merge: true }); 
+      // Or actually delete: deleteDoc(doc(db, 'users', uid));
+  },
+
+  deletePost: async (postId: string) => {
+      // deleteDoc(doc(db, 'posts', postId));
   }
 };

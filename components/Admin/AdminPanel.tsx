@@ -6,29 +6,41 @@ import { StorageService } from '../../services/storage';
 export const AdminPanel: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
-
-  const loadData = () => {
-    setUsers(StorageService.getUsers());
-    setPosts(StorageService.getPosts());
-  };
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    loadData();
+      // Subscribe or fetch once? Fetch once for admin efficiency.
+      const load = async () => {
+          setIsLoading(true);
+          const u = await StorageService.getAllUsers();
+          // For posts, we don't have a getAllPosts efficient method in service yet exposed (Feed subscribes).
+          // We'll simulate by subscribing briefly or add method. 
+          // Reusing subscribeToPosts but it only gets 50. 
+          // For full admin, we need a different query. For now, use what we have.
+          const unsub = StorageService.subscribeToPosts((p) => setPosts(p));
+          setUsers(u);
+          setIsLoading(false);
+          return unsub;
+      };
+      load();
   }, []);
 
-  const deleteUser = (id: string) => {
+  const deleteUser = async (id: string) => {
     if (confirm('Are you sure? This action cannot be undone.')) {
-        const newUsers = users.filter(u => u.id !== id);
-        StorageService.saveUsers(newUsers);
-        loadData();
+        await StorageService.deleteUser(id);
+        // refresh
+        const u = await StorageService.getAllUsers();
+        setUsers(u);
     }
   };
 
-  const deletePost = (id: string) => {
-      const newPosts = posts.filter(p => p.id !== id);
-      StorageService.savePosts(newPosts);
-      loadData();
+  const deletePost = async (id: string) => {
+      if (confirm('Delete post?')) {
+          await StorageService.deletePost(id);
+      }
   };
+
+  if (isLoading) return <div className="p-10 text-center">Loading Admin Data...</div>;
 
   return (
     <div className="max-w-6xl mx-auto p-8 pb-24">
@@ -43,7 +55,7 @@ export const AdminPanel: React.FC = () => {
               <p className="text-4xl font-bold text-white">{users.length}</p>
           </div>
           <div className="glass-card p-6 rounded-xl border-l-4 border-neon-pink">
-              <h3 className="text-gray-400 mb-1">Total Posts</h3>
+              <h3 className="text-gray-400 mb-1">Active Posts</h3>
               <p className="text-4xl font-bold text-white">{posts.length}</p>
           </div>
           <div className="glass-card p-6 rounded-xl border-l-4 border-neon-cyan">

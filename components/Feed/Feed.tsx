@@ -9,38 +9,9 @@ interface FeedProps {
   onRefresh: () => void;
 }
 
-// Helper to compress images before storage
-const compressImage = (base64Str: string, maxWidth = 800, quality = 0.7): Promise<string> => {
-    return new Promise((resolve) => {
-        const img = new Image();
-        img.src = base64Str;
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            let width = img.width;
-            let height = img.height;
-
-            if (width > maxWidth) {
-                height = (maxWidth / width) * height;
-                width = maxWidth;
-            }
-
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-                ctx.drawImage(img, 0, 0, width, height);
-                resolve(canvas.toDataURL('image/jpeg', quality));
-            } else {
-                resolve(base64Str); // Fallback
-            }
-        };
-        img.onerror = () => resolve(base64Str);
-    });
-};
-
 export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, onRefresh }) => {
   const [posts, setPosts] = useState<Post[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+  const [usersMap, setUsersMap] = useState<Record<string, User>>({}); // Cache users
   const [newPostContent, setNewPostContent] = useState('');
   const [showCommentInput, setShowCommentInput] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
@@ -51,49 +22,64 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
   const [shareCaption, setShareCaption] = useState('');
 
   // Image Upload State
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [isCompressing, setIsCompressing] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const loadData = () => {
-    const allPosts = StorageService.getPosts();
-    const allUsers = StorageService.getUsers();
-    
-    // Filter Posts: Show if public (no target) OR target includes me OR I am author
-    const visiblePosts = allPosts.filter(p => 
-        !p.targetUserIds || 
-        p.targetUserIds.length === 0 || 
-        p.targetUserIds.includes(currentUser.id) || 
-        p.authorId === currentUser.id
-    );
-    
-    setPosts(visiblePosts);
-    setUsers(allUsers);
-  };
-
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 2000); // Poll for updates
-    return () => clearInterval(interval);
+    // Real-time subscription
+    const unsubscribe = StorageService.subscribeToPosts(async (allPosts) => {
+        // 1. Filter
+        const visiblePosts = allPosts.filter(p => 
+            !p.targetUserIds || 
+            p.targetUserIds.length === 0 || 
+            p.targetUserIds.includes(currentUser.id) || 
+            p.authorId === currentUser.id
+        );
+        
+        // 2. Fetch authors if missing
+        const authorIds = new Set(visiblePosts.map(p => p.authorId));
+        visiblePosts.forEach(p => p.sharedFromId && authorIds.add(p.authorId)); // Simplified logic
+        
+        // Note: In robust app, check cache before fetching. For prototype, we'll fetch individually or rely on cache logic.
+        // We'll do a quick fetch of missing.
+        const newMap = { ...usersMap };
+        for (const uid of authorIds) {
+            if (!newMap[uid]) {
+                const u = await StorageService.getUser(uid);
+                if (u) newMap[uid] = u;
+            }
+        }
+        setUsersMap(newMap);
+        setPosts(visiblePosts);
+    });
+
+    return () => unsubscribe();
   }, [currentUser]);
 
-  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-        setIsCompressing(true);
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-            const rawBase64 = reader.result as string;
-            const compressed = await compressImage(rawBase64);
-            setSelectedImage(compressed);
-            setIsCompressing(false);
-        };
-        reader.readAsDataURL(file);
+        setSelectedFile(file);
+        setPreviewUrl(URL.createObjectURL(file));
     }
   };
 
-  const handleCreatePost = () => {
-    if (!newPostContent.trim() && !selectedImage) return;
+  const handleCreatePost = async () => {
+    if (!newPostContent.trim() && !selectedFile) return;
+    setIsUploading(true);
+
+    let imageUrl = undefined;
+    if (selectedFile) {
+        try {
+            imageUrl = await StorageService.uploadImage(selectedFile, `posts/${currentUser.id}/${Date.now()}_${selectedFile.name}`);
+        } catch (e) {
+            alert("Failed to upload image");
+            setIsUploading(false);
+            return;
+        }
+    }
     
     const newPost: Post = {
       id: `post-${Date.now()}`,
@@ -102,17 +88,19 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
       likes: [],
       comments: [],
       createdAt: Date.now(),
-      image: selectedImage || undefined
+      image: imageUrl
     };
 
-    StorageService.createPost(newPost);
+    await StorageService.createPost(newPost);
     setNewPostContent('');
-    setSelectedImage(null);
-    loadData();
+    setSelectedFile(null);
+    setPreviewUrl(null);
+    setIsUploading(false);
   };
 
-  const handleSharePost = () => {
+  const handleSharePost = async () => {
       if (!postToShare) return;
+      setIsUploading(true);
 
       const newPost: Post = {
           id: `post-share-${Date.now()}`,
@@ -125,34 +113,38 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
           targetUserIds: selectedFriends.length > 0 ? selectedFriends : undefined
       };
 
-      StorageService.createPost(newPost);
+      await StorageService.createPost(newPost);
       setPostToShare(null);
       setShareCaption('');
       setSelectedFriends([]);
-      loadData();
+      setIsUploading(false);
   };
 
   const handleLike = (post: Post) => {
-    const isLiked = post.likes.includes(currentUser.id);
-    const updatedPost = {
-      ...post,
-      likes: isLiked 
+      // Firestore handles updates async, but optimistic UI is tricky with simple array updates without transactions.
+      // For prototype, we just call update.
+      // In real app: arrayUnion/arrayRemove
+      const isLiked = post.likes.includes(currentUser.id);
+      
+      // Re-save post with modified likes (Naive approach, race conditions possible)
+      // Better: StorageService.toggleLike(postId, userId) which uses db transaction
+      
+      // Since we didn't implement specific toggleLike, we use createPost(overwrite) or generic update
+      // We need generic update for this.
+      // Implementing manual toggle locally and saving.
+      const updatedLikes = isLiked 
         ? post.likes.filter(id => id !== currentUser.id)
-        : [...post.likes, currentUser.id]
-    };
-    
-    const allPosts = StorageService.getPosts();
-    const newAllPosts = allPosts.map(p => p.id === post.id ? updatedPost : p);
-    StorageService.savePosts(newAllPosts);
-    setPosts(posts.map(p => p.id === post.id ? updatedPost : p));
+        : [...post.likes, currentUser.id];
+      
+      // We can't easily use StorageService.createPost to update because it does setDoc.
+      // We'll cast to any to piggyback on createPost which does setDoc (merge is false usually). 
+      // Actually StorageService.createPost does setDoc.
+      StorageService.createPost({ ...post, likes: updatedLikes });
   };
 
-  const handleComment = (postId: string) => {
+  const handleComment = (post: Post) => {
       if(!commentText.trim()) return;
-      const allPosts = StorageService.getPosts();
-      const postIndex = allPosts.findIndex(p => p.id === postId);
-      if(postIndex === -1) return;
-
+      
       const newComment: Comment = {
           id: `c-${Date.now()}`,
           authorId: currentUser.id,
@@ -160,11 +152,13 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
           createdAt: Date.now()
       };
 
-      allPosts[postIndex].comments.push(newComment);
-      StorageService.savePosts(allPosts);
+      StorageService.createPost({
+          ...post,
+          comments: [...post.comments, newComment]
+      });
+      
       setCommentText('');
       setShowCommentInput(null);
-      loadData();
   }
 
   const handleDownload = (e: React.MouseEvent, src: string, filename: string) => {
@@ -172,6 +166,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
       const link = document.createElement('a');
       link.href = src;
       link.download = filename;
+      link.target = "_blank"; // For Firebase URLs
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -185,13 +180,16 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
       }
   };
 
-  const getUser = (id: string) => users.find(u => u.id === id);
-  const getPost = (id: string) => {
-      // Helper to find post even if it's not in current view state, fetch from storage for source of truth
-      return StorageService.getPosts().find(p => p.id === id);
-  };
-
-  const myFriends = users.filter(u => currentUser.friends.includes(u.id));
+  const getUser = (id: string) => usersMap[id];
+  
+  // Need to fetch my friends list details for sharing modal
+  const [myFriendDetails, setMyFriendDetails] = useState<User[]>([]);
+  useEffect(() => {
+      if (postToShare) {
+          Promise.all(currentUser.friends.map(fid => StorageService.getUser(fid)))
+             .then(users => setMyFriendDetails(users.filter(u => !!u) as User[]));
+      }
+  }, [postToShare, currentUser]);
 
   return (
     <div className="max-w-2xl mx-auto pb-20 pt-6 px-4">
@@ -207,11 +205,11 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
               className="w-full bg-white/5 rounded-xl p-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-neon-purple/50 resize-none min-h-[80px]"
             />
             
-            {selectedImage && (
+            {previewUrl && (
                 <div className="relative mt-2 mb-2 rounded-xl overflow-hidden group">
-                    <img src={selectedImage} alt="Preview" className="max-h-60 w-auto object-cover rounded-lg border border-white/10" />
+                    <img src={previewUrl} alt="Preview" className="max-h-60 w-auto object-cover rounded-lg border border-white/10" />
                     <button 
-                        onClick={() => setSelectedImage(null)}
+                        onClick={() => { setPreviewUrl(null); setSelectedFile(null); }}
                         className="absolute top-2 right-2 p-1 bg-black/50 rounded-full text-white hover:bg-red-500 transition-colors"
                     >
                         <X size={16} />
@@ -229,18 +227,18 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
               />
               <button 
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isCompressing}
+                disabled={isUploading}
                 className="text-gray-400 hover:text-neon-cyan transition-colors flex items-center gap-2 disabled:opacity-50"
               >
                 <ImageIcon size={20} />
-                <span className="text-sm">{isCompressing ? 'Processing...' : 'Add Photo'}</span>
+                <span className="text-sm">Add Photo</span>
               </button>
               <button 
                 onClick={handleCreatePost}
-                disabled={isCompressing}
+                disabled={isUploading}
                 className="bg-gradient-to-r from-neon-blue to-neon-purple text-white px-6 py-2 rounded-lg font-bold shadow-[0_0_15px_rgba(59,130,246,0.4)] hover:scale-105 transition-transform disabled:opacity-50 disabled:hover:scale-100"
               >
-                Post
+                {isUploading ? 'Posting...' : 'Post'}
               </button>
             </div>
           </div>
@@ -252,7 +250,13 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
         {posts.map(post => {
           const author = getUser(post.authorId);
           const isLiked = post.likes.includes(currentUser.id);
-          const originalPost = post.sharedFromId ? getPost(post.sharedFromId) : null;
+          // For shared post content, we'd ideally fetch the original post. 
+          // For now, if sharedFromId exists but we don't have the content, we might show loading or look it up.
+          // The subscription fetches ordered posts, so original might be down the list or missing.
+          // We'll do a simple lookup if needed or just display what we have if we had a structured "sharedPost" object (which we don't, just ID).
+          // *Simplification*: We won't fetch recursive shared posts in this prototype feed loop to avoid N+1 requests. 
+          // We only show if it happens to be in 'posts' or if we embedded it.
+          const originalPost = post.sharedFromId ? posts.find(p => p.id === post.sharedFromId) : null;
           const originalAuthor = originalPost ? getUser(originalPost.authorId) : null;
           
           return (
@@ -276,7 +280,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                         onClick={() => author && onNavigateToProfile(author.id)}
                         className="font-bold text-white cursor-pointer hover:text-neon-blue transition-colors"
                     >
-                        {author?.name || 'Unknown User'}
+                        {author?.name || 'Loading...'}
                     </h3>
                     <p className="text-xs text-gray-400">@{author?.userId} • {new Date(post.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                     {post.targetUserIds && post.targetUserIds.length > 0 && <span className="ml-2 text-neon-purple">(Private Share)</span>}
@@ -313,12 +317,6 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                       {originalPost.image && (
                           <div className="rounded-lg overflow-hidden relative group">
                               <img src={originalPost.image} className="w-full h-48 object-cover" />
-                                <button 
-                                    onClick={(e) => handleDownload(e, originalPost.image!, `neobook_post_${originalPost.id}.png`)}
-                                    className="absolute bottom-2 right-2 p-2 bg-black/60 backdrop-blur-md rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-neon-purple"
-                                >
-                                    <Download size={16} />
-                                </button>
                           </div>
                       )}
                   </div>
@@ -351,11 +349,13 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
               {(showCommentInput === post.id || post.comments.length > 0) && (
                   <div className="mt-4 pt-4 border-t border-white/5 space-y-3">
                       {post.comments.map(c => {
+                          // Ideally fetch comment authors. For now assume cached or just show name if we had it.
+                          // Since Comment struct only has authorId, we look up in our map.
                           const cAuthor = getUser(c.authorId);
                           return (
                               <div key={c.id} className="flex gap-2">
                                   <img 
-                                    src={cAuthor?.avatar} 
+                                    src={cAuthor?.avatar || 'https://picsum.photos/50'} 
                                     className="w-6 h-6 rounded-full cursor-pointer" 
                                     onClick={() => cAuthor && onNavigateToProfile(cAuthor.id)}
                                   />
@@ -364,7 +364,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                                         className="text-xs font-bold text-gray-300 cursor-pointer hover:text-neon-blue"
                                         onClick={() => cAuthor && onNavigateToProfile(cAuthor.id)}
                                       >
-                                          {cAuthor?.name}
+                                          {cAuthor?.name || 'Unknown'}
                                       </p>
                                       <p className="text-sm text-gray-400">{c.content}</p>
                                   </div>
@@ -380,7 +380,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                                 value={commentText}
                                 onChange={(e) => setCommentText(e.target.value)}
                              />
-                             <button onClick={() => handleComment(post.id)} className="p-2 text-neon-blue"><Send size={18} /></button>
+                             <button onClick={() => handleComment(post)} className="p-2 text-neon-blue"><Send size={18} /></button>
                          </div>
                       )}
                   </div>
@@ -391,7 +391,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
         
         {posts.length === 0 && (
              <div className="text-center py-10 text-gray-500">
-                 <p>No posts yet. Be the first to share something!</p>
+                 <p>Loading posts or no activity...</p>
              </div>
         )}
       </div>
@@ -420,7 +420,7 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                   <div className="mb-6">
                       <p className="text-sm font-bold text-gray-400 mb-2">Select Friends (Optional - Default: All)</p>
                       <div className="max-h-40 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                          {myFriends.map(friend => (
+                          {myFriendDetails.map(friend => (
                               <div 
                                 key={friend.id} 
                                 onClick={() => toggleFriendSelection(friend.id)}
@@ -433,15 +433,16 @@ export const Feed: React.FC<FeedProps> = ({ currentUser, onNavigateToProfile, on
                                   {selectedFriends.includes(friend.id) && <CheckCircle size={16} className="text-neon-purple"/>}
                               </div>
                           ))}
-                          {myFriends.length === 0 && <p className="text-xs text-gray-500">Add friends to share privately.</p>}
+                          {myFriendDetails.length === 0 && <p className="text-xs text-gray-500">No friends to share privately with.</p>}
                       </div>
                   </div>
 
                   <button 
                     onClick={handleSharePost}
-                    className="w-full bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold py-3 rounded-xl hover:shadow-[0_0_15px_rgba(168,85,247,0.4)] transition-shadow"
+                    disabled={isUploading}
+                    className="w-full bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold py-3 rounded-xl hover:shadow-[0_0_15px_rgba(168,85,247,0.4)] transition-shadow disabled:opacity-50"
                   >
-                      Share Now
+                      {isUploading ? 'Sharing...' : 'Share Now'}
                   </button>
               </div>
           </div>

@@ -16,40 +16,51 @@ export const Friends: React.FC<FriendsProps> = ({ currentUser, onNavigateToProfi
   const [friendRequests, setFriendRequests] = useState<User[]>([]);
   const [myFriends, setMyFriends] = useState<User[]>([]);
   const [message, setMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
-  const loadData = () => {
-      const allUsers = StorageService.getUsers();
-      const requests = allUsers.filter(u => currentUser.friendRequests.includes(u.id));
-      const friends = allUsers.filter(u => currentUser.friends.includes(u.id));
-      setFriendRequests(requests);
-      setMyFriends(friends);
+  const loadData = async () => {
+      // 1. Fetch Friend Requests
+      const requestPromises = currentUser.friendRequests.map(id => StorageService.getUser(id));
+      const reqUsers = await Promise.all(requestPromises);
+      setFriendRequests(reqUsers.filter(u => !!u) as User[]);
+
+      // 2. Fetch Friends
+      const friendPromises = currentUser.friends.map(id => StorageService.getUser(id));
+      const friendUsers = await Promise.all(friendPromises);
+      setMyFriends(friendUsers.filter(u => !!u) as User[]);
   };
 
   useEffect(() => {
       loadData();
   }, [currentUser]);
 
-  const handleSearch = () => {
+  const handleSearch = async () => {
     if (!searchTerm) return;
-    const allUsers = StorageService.getUsers();
-    // Exact User ID match or partial Username match
-    const results = allUsers.filter(u => 
-      u.userId.toLowerCase() === searchTerm.toLowerCase() || 
-      u.username.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-    setSearchResults(results);
+    setIsLoading(true);
+    
+    // We can only efficiently search by exact custom User ID in Firebase without indexing everything 
+    // or using a full text search service like Algolia.
+    // For prototype, we'll search by exact custom ID.
+    const user = await StorageService.findUserByCustomId(searchTerm);
+    if (user) {
+        setSearchResults([user]);
+    } else {
+        setSearchResults([]);
+        setMessage('User not found');
+        setTimeout(() => setMessage(''), 3000);
+    }
+    setIsLoading(false);
   };
 
-  const sendRequest = (targetUserId: string) => {
-    const result = StorageService.sendFriendRequest(currentUser.id, targetUserId);
+  const sendRequest = async (targetUserId: string) => {
+    const result = await StorageService.sendFriendRequest(currentUser.id, targetUserId);
     setMessage(result.message);
     setTimeout(() => setMessage(''), 3000);
   };
 
-  const acceptRequest = (requesterId: string) => {
-      StorageService.acceptFriendRequest(currentUser.id, requesterId);
-      onRefresh(); // Refresh global state immediately
-      loadData();
+  const acceptRequest = async (requesterId: string) => {
+      await StorageService.acceptFriendRequest(currentUser.id, requesterId);
+      onRefresh(); // Trigger global refresh to update currentUser object
   };
 
   return (
@@ -61,7 +72,7 @@ export const Friends: React.FC<FriendsProps> = ({ currentUser, onNavigateToProfi
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
                 <input 
                     type="text" 
-                    placeholder="Enter User ID (e.g. NeoKing77)..."
+                    placeholder="Enter exact User ID (e.g. NeoKing77)..."
                     className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-xl text-white focus:ring-2 focus:ring-neon-purple focus:outline-none backdrop-blur-md"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
@@ -70,9 +81,10 @@ export const Friends: React.FC<FriendsProps> = ({ currentUser, onNavigateToProfi
             </div>
             <button 
                 onClick={handleSearch}
-                className="bg-neon-purple text-white px-8 rounded-xl font-bold hover:bg-neon-purple/80 transition-colors"
+                disabled={isLoading}
+                className="bg-neon-purple text-white px-8 rounded-xl font-bold hover:bg-neon-purple/80 transition-colors disabled:opacity-50"
             >
-                Search
+                {isLoading ? '...' : 'Search'}
             </button>
           </div>
           {message && <p className="mt-2 text-neon-cyan animate-pulse">{message}</p>}

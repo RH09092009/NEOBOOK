@@ -16,57 +16,69 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
   });
   const [error, setError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
 
-    if (isLogin) {
-      // Login Logic
-      const users = StorageService.getUsers();
-      const user = users.find(
-        u => (u.userId === formData.userId) && u.password === formData.password
-      );
-
-      if (user) {
+    try {
+      if (isLogin) {
+        // Login Logic
+        const user = await StorageService.login(formData.userId, formData.password);
         onLogin(user);
       } else {
-        setError('Invalid credentials. Please check your User ID and password.');
-      }
-    } else {
-      // Signup Logic
-      if (!formData.userId || !formData.password || !formData.username) {
-        setError('All fields are required.');
-        return;
-      }
-      
-      // Validation for ID
-      if(formData.userId.length < 3) {
-          setError('User ID must be at least 3 characters.');
+        // Signup Logic
+        if (!formData.userId || !formData.password || !formData.username) {
+          setError('All fields are required.');
+          setLoading(false);
           return;
+        }
+        
+        // Validation for ID
+        if(formData.userId.length < 3) {
+            setError('User ID must be at least 3 characters.');
+            setLoading(false);
+            return;
+        }
+
+        const available = await StorageService.checkIdAvailability(formData.userId);
+        if (!available) {
+            setError('User ID already taken.');
+            setLoading(false);
+            return;
+        }
+
+        const newUser: User = {
+          id: '', // Will be set by Firebase Auth UID
+          userId: formData.userId,
+          username: formData.username, 
+          name: formData.username, 
+          password: '', // Don't store raw password
+          avatar: `https://picsum.photos/seed/${formData.userId}/200`,
+          coverPhoto: `https://picsum.photos/seed/${formData.userId}/800/300`,
+          bio: 'Hello Neo World!',
+          joinedAt: Date.now(),
+          friends: [],
+          friendRequests: [],
+          status: 'online'
+        };
+
+        const createdUser = await StorageService.signup(newUser, formData.password);
+        onLogin(createdUser);
       }
-
-      const newUser: User = {
-        id: crypto.randomUUID(),
-        userId: formData.userId,
-        username: formData.username, // Actually acts as handle/ID in some contexts, but we use userId as unique
-        name: formData.username, // Display name
-        password: formData.password,
-        avatar: `https://picsum.photos/seed/${formData.userId}/200`,
-        coverPhoto: `https://picsum.photos/seed/${formData.userId}/800/300`,
-        bio: 'Hello Neo World!',
-        joinedAt: Date.now(),
-        friends: [],
-        friendRequests: [],
-        status: 'online'
-      };
-
-      const success = StorageService.createUser(newUser);
-      if (success) {
-        onLogin(newUser);
+    } catch (err: any) {
+      console.error(err);
+      if (err.code === 'auth/email-already-in-use') {
+          setError('User ID already exists.');
+      } else if (err.code === 'auth/invalid-credential' || err.message === 'User profile not found') {
+          setError('Invalid credentials.');
       } else {
-        setError('User ID already exists. Please choose a unique ID.');
+          setError('Authentication failed. Check connection.');
       }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -147,10 +159,11 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
 
             <button
               type="submit"
-              className="w-full bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold py-3.5 rounded-xl shadow-lg shadow-neon-purple/25 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2 group"
+              disabled={loading}
+              className="w-full bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold py-3.5 rounded-xl shadow-lg shadow-neon-purple/25 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2 group disabled:opacity-50"
             >
-              {isLogin ? 'Initialize Session' : 'Create Account'}
-              <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />
+              {loading ? 'Processing...' : (isLogin ? 'Initialize Session' : 'Create Account')}
+              {!loading && <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />}
             </button>
           </form>
 

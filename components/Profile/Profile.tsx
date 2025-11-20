@@ -10,40 +10,12 @@ interface ProfileProps {
   onRefresh: () => void;
 }
 
-// Helper to compress images
-const compressImage = (base64Str: string, maxWidth = 800, quality = 0.7): Promise<string> => {
-    return new Promise((resolve) => {
-        const img = new Image();
-        img.src = base64Str;
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            let width = img.width;
-            let height = img.height;
-
-            if (width > maxWidth) {
-                height = (maxWidth / width) * height;
-                width = maxWidth;
-            }
-
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-                ctx.drawImage(img, 0, 0, width, height);
-                resolve(canvas.toDataURL('image/jpeg', quality));
-            } else {
-                resolve(base64Str);
-            }
-        };
-        img.onerror = () => resolve(base64Str);
-    });
-};
-
 export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, onNavigateToChat, onRefresh }) => {
   const [profileUser, setProfileUser] = useState<User | null>(null);
   const [userPosts, setUserPosts] = useState<Post[]>([]);
   const [isOwnProfile, setIsOwnProfile] = useState(false);
   const [friendStatus, setFriendStatus] = useState<'none' | 'friend' | 'sent' | 'received'>('none');
+  const [isLoading, setIsLoading] = useState(true);
   
   // Edit Mode State
   const [isEditing, setIsEditing] = useState(false);
@@ -54,66 +26,79 @@ export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, 
       email: ''
   });
   const [editError, setEditError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   // Refs for file inputs
   const coverInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
-  const loadProfileData = () => {
-      const users = StorageService.getUsers();
-      const foundUser = users.find(u => u.id === viewedProfileId) || currentUser;
+  const loadProfileData = async () => {
+      setIsLoading(true);
+      let foundUser: User | undefined;
       
-      setProfileUser(foundUser);
-      setIsOwnProfile(foundUser.id === currentUser.id);
-      setEditForm({
-          name: foundUser.name,
-          userId: foundUser.userId,
-          bio: foundUser.bio,
-          email: foundUser.email || ''
-      });
-
-      // Get User Posts
-      const allPosts = StorageService.getPosts();
-      const myPosts = allPosts.filter(p => p.authorId === foundUser.id);
-      setUserPosts(myPosts);
-
-      // Determine Friend Status
-      if (currentUser.friends.includes(foundUser.id)) {
-          setFriendStatus('friend');
-      } else if (foundUser.friendRequests.includes(currentUser.id)) {
-          setFriendStatus('sent');
-      } else if (currentUser.friendRequests.includes(foundUser.id)) {
-          setFriendStatus('received');
+      if (viewedProfileId === currentUser.id) {
+          foundUser = currentUser;
       } else {
-          setFriendStatus('none');
+          foundUser = await StorageService.getUser(viewedProfileId);
       }
+
+      if (foundUser) {
+          setProfileUser(foundUser);
+          setIsOwnProfile(foundUser.id === currentUser.id);
+          setEditForm({
+              name: foundUser.name,
+              userId: foundUser.userId,
+              bio: foundUser.bio,
+              email: foundUser.email || ''
+          });
+
+          // Determine Friend Status
+          if (currentUser.friends.includes(foundUser.id)) {
+              setFriendStatus('friend');
+          } else if (foundUser.friendRequests.includes(currentUser.id)) {
+              setFriendStatus('sent');
+          } else if (currentUser.friendRequests.includes(foundUser.id)) {
+              setFriendStatus('received');
+          } else {
+              setFriendStatus('none');
+          }
+      }
+      setIsLoading(false);
   };
+
+  // Listen to posts (reuse Feed logic partially or just filter client side for prototype simplicty)
+  useEffect(() => {
+      // We subscribe to all posts and filter. In production, use a where query.
+      const unsub = StorageService.subscribeToPosts((allPosts) => {
+          if (profileUser) {
+              const myPosts = allPosts.filter(p => p.authorId === profileUser.id);
+              setUserPosts(myPosts);
+          }
+      });
+      return () => unsub();
+  }, [profileUser?.id]);
 
   useEffect(() => {
       loadProfileData();
   }, [viewedProfileId, currentUser]);
 
-  const handlePhotoUpload = (type: 'avatar' | 'cover', e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (type: 'avatar' | 'cover', e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (file && profileUser) {
-          const reader = new FileReader();
-          reader.onloadend = async () => {
-              const rawBase64 = reader.result as string;
-              const compressed = await compressImage(rawBase64);
-              
+          try {
+              const url = await StorageService.uploadImage(file, `users/${profileUser.id}/${type}_${Date.now()}`);
               const updatedUser = { ...profileUser };
-              if (type === 'avatar') updatedUser.avatar = compressed;
-              if (type === 'cover') updatedUser.coverPhoto = compressed;
+              if (type === 'avatar') updatedUser.avatar = url;
+              if (type === 'cover') updatedUser.coverPhoto = url;
               
-              const success = StorageService.updateUser(updatedUser);
+              const success = await StorageService.updateUser(updatedUser);
               if (success) {
                   setProfileUser(updatedUser);
-                  onRefresh(); // Refresh global user data to update avatar everywhere
-              } else {
-                  alert("Could not update photo. Storage may be full.");
+                  onRefresh(); 
               }
-          };
-          reader.readAsDataURL(file);
+          } catch (e) {
+              alert("Upload failed.");
+          }
       }
   };
 
@@ -121,31 +106,42 @@ export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, 
       const link = document.createElement('a');
       link.href = src;
       link.download = name;
+      link.target = "_blank";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
   };
 
-  const handleFriendAction = () => {
+  const handleFriendAction = async () => {
       if (!profileUser) return;
 
       if (friendStatus === 'none') {
-          StorageService.sendFriendRequest(currentUser.id, profileUser.userId);
+          await StorageService.sendFriendRequest(currentUser.id, profileUser.userId);
           setFriendStatus('sent');
           onRefresh();
       } else if (friendStatus === 'received') {
-          StorageService.acceptFriendRequest(currentUser.id, profileUser.id);
+          await StorageService.acceptFriendRequest(currentUser.id, profileUser.id);
           setFriendStatus('friend');
           onRefresh();
       }
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
       if (!profileUser) return;
       setEditError('');
+      setIsSaving(true);
       
       if (!editForm.userId || !editForm.name) {
           setEditError('Name and User ID are required.');
+          setIsSaving(false);
+          return;
+      }
+
+      // Check avail
+      const isAvailable = await StorageService.checkIdAvailability(editForm.userId, currentUser.id);
+      if (!isAvailable) {
+          setEditError('User ID is already taken.');
+          setIsSaving(false);
           return;
       }
 
@@ -157,17 +153,18 @@ export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, 
           email: editForm.email
       };
 
-      const success = StorageService.updateUser(updatedUser);
+      const success = await StorageService.updateUser(updatedUser);
       if (success) {
           setProfileUser(updatedUser);
           setIsEditing(false);
           onRefresh();
       } else {
-          setEditError('User ID is already taken or storage is full.');
+          setEditError('Failed to save.');
       }
+      setIsSaving(false);
   };
 
-  if (!profileUser) return <div>Loading...</div>;
+  if (isLoading || !profileUser) return <div className="p-10 text-center">Loading Profile...</div>;
 
   return (
     <div className="max-w-4xl mx-auto pb-24">
@@ -287,9 +284,11 @@ export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, 
                       <span className="text-neon-purple text-sm">{profileUser.friends.length}</span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
-                       {/* Placeholder for friends grid visualization */}
                        {profileUser.friends.slice(0, 9).map((fid, i) => (
-                           <div key={i} className="bg-white/5 rounded-lg aspect-square border border-white/5"></div>
+                           <div key={i} className="bg-white/5 rounded-lg aspect-square border border-white/5 flex items-center justify-center text-xs text-gray-500">
+                               {/* In real app, fetch friend avatars. Placeholder for now to save reads */}
+                               <div className="w-full h-full bg-gray-800 rounded-lg"></div>
+                           </div>
                        ))}
                        {profileUser.friends.length === 0 && <p className="col-span-3 text-xs text-gray-500">No connections yet.</p>}
                   </div>
@@ -395,9 +394,10 @@ export const Profile: React.FC<ProfileProps> = ({ currentUser, viewedProfileId, 
                       </button>
                       <button 
                           onClick={handleSaveProfile}
-                          className="flex-1 py-3 rounded-xl bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold shadow-lg hover:shadow-neon-purple/30 transition-shadow flex justify-center items-center gap-2"
+                          disabled={isSaving}
+                          className="flex-1 py-3 rounded-xl bg-gradient-to-r from-neon-blue to-neon-purple text-white font-bold shadow-lg hover:shadow-neon-purple/30 transition-shadow flex justify-center items-center gap-2 disabled:opacity-50"
                       >
-                          <Save size={18} /> Save Changes
+                          {isSaving ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : <><Save size={18} /> Save Changes</>}
                       </button>
                   </div>
               </div>

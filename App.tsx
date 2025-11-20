@@ -19,34 +19,34 @@ const App: React.FC = () => {
   const [chatTargetId, setChatTargetId] = useState<string | null>(null);
 
   useEffect(() => {
-    // Simulate initial splash screen loading
-    setTimeout(() => {
-      const sessionUser = StorageService.getCurrentUser();
-      if (sessionUser) {
-        setUser(sessionUser);
-        setView('feed');
+    const unsubscribe = StorageService.observeAuth((authUser) => {
+      if (authUser) {
+        setUser(authUser);
+        if (view === 'login') setView('feed');
+      } else {
+        setUser(null);
+        setView('login');
       }
       setIsLoading(false);
-    }, 1500);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const refreshUser = () => {
-      const updatedUser = StorageService.getCurrentUser();
-      if (updatedUser) {
-          setUser(updatedUser);
+  const refreshUser = async () => {
+      if (user) {
+          const freshUser = await StorageService.getUser(user.id);
+          if (freshUser) setUser(freshUser);
       }
   };
 
   const handleLogin = (loggedInUser: User) => {
     setUser(loggedInUser);
-    StorageService.setCurrentUser(loggedInUser);
     setView('feed');
   };
 
   const handleLogout = () => {
-    StorageService.setCurrentUser(null);
-    setUser(null);
-    setView('login');
+    StorageService.logout();
     setViewedProfileId(null);
     setChatTargetId(null);
   };
@@ -70,7 +70,7 @@ const App: React.FC = () => {
              <span className="text-4xl font-bold text-white">N</span>
           </div>
           <h1 className="text-4xl font-bold text-white tracking-[0.2em] animate-pulse">NEOBOOK</h1>
-          <p className="text-neon-cyan mt-2 text-sm uppercase tracking-widest">Loading Future Interface...</p>
+          <p className="text-neon-cyan mt-2 text-sm uppercase tracking-widest">Initializing System...</p>
         </div>
       </div>
     );
